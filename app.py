@@ -24,8 +24,10 @@ noise_level = st.sidebar.slider("Noise Level", 0.0, 0.2, 0.05, help="How messy i
 n_points = st.sidebar.slider("Data Points", 10, 100, 40)
 
 st.sidebar.header("3. AI Training")
-lr = st.sidebar.selectbox("Learning Rate", [0.01, 0.005, 0.001], index=1)
-iterations = st.sidebar.slider("Iterations", 500, 5000, 2000)
+lr = st.sidebar.selectbox("Learning Rate", [0.01, 0.005, 0.001, 0.0005, 0.0001], index=1)
+
+# --- UPDATED SLIDER (UP TO 50,000) ---
+iterations = st.sidebar.slider("Iterations (Epochs)", min_value=1000, max_value=50000, value=10000, step=1000)
 
 # --- MAIN APP ---
 
@@ -73,6 +75,10 @@ if start:
     prog_bar = st.progress(0)
     status_text = st.empty()
     chart_placeholder = col2.empty()
+    
+    # Calculate plot update interval (Update graph 10 times total to save speed)
+    plot_interval = iterations // 10
+    if plot_interval < 1: plot_interval = 1
 
     for i in range(iterations):
         optimizer.zero_grad()
@@ -93,35 +99,40 @@ if start:
         history['d'].append(curr_d)
         history['w0'].append(curr_w0)
         
-        if i % 50 == 0:
+        # Update Progress Bar logic
+        if i % (iterations // 100) == 0:
             prog_bar.progress((i+1)/iterations)
-            status_text.text(f"Iter {i}: Found d={curr_d:.4f}, w0={curr_w0:.4f}")
+            status_text.text(f"Iter {i}/{iterations}: Found d={curr_d:.4f}, w0={curr_w0:.4f}")
             
-            # Live update plot every 500 iters to save speed
-            if i % 500 == 0:
-                with chart_placeholder.container():
-                    # Plot 1: Parameter Convergence
-                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
-                    
-                    ax1.plot(history['d'], label='Estimated d')
-                    ax1.axhline(y=true_d, color='g', linestyle='--', label='True d')
-                    ax1.plot(history['w0'], label='Estimated w0')
-                    ax1.axhline(y=true_w0, color='r', linestyle='--', label='True w0')
-                    ax1.set_title("Parameter Discovery Over Time")
-                    ax1.legend()
-                    
-                    # Plot 2: Curve Fit
-                    model.eval()
-                    pred = model(t_phys_torch).detach().numpy()
-                    ax2.plot(t_full, u_clean, 'g--', alpha=0.5, label="True Clean")
-                    ax2.plot(t_full, pred, 'b-', label="AI Approximation")
-                    ax2.scatter(t_train, u_train, c='red', s=10, alpha=0.5)
-                    ax2.set_title("Current Physical Model")
-                    ax2.legend()
-                    
-                    st.pyplot(fig)
-                    plt.close(fig)
-                    model.train()
+        # Live update plot (Only update 10 times total to prevent freezing)
+        if i % plot_interval == 0 or i == iterations - 1:
+            with chart_placeholder.container():
+                # Plot 1: Parameter Convergence
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+                
+                ax1.plot(history['d'], label='Estimated d', color='blue')
+                ax1.axhline(y=true_d, color='green', linestyle='--', label='True d', alpha=0.7)
+                
+                ax1.plot(history['w0'], label='Estimated w0', color='orange')
+                ax1.axhline(y=true_w0, color='red', linestyle='--', label='True w0', alpha=0.7)
+                
+                ax1.set_title("Parameter Discovery Over Time")
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
+                
+                # Plot 2: Curve Fit
+                model.eval()
+                pred = model(t_phys_torch).detach().numpy()
+                ax2.plot(t_full, u_clean, 'g--', alpha=0.5, label="True Clean")
+                ax2.plot(t_full, pred, 'b-', label="AI Approximation")
+                ax2.scatter(t_train, u_train, c='red', s=10, alpha=0.5)
+                ax2.set_title(f"Current Physics: d={curr_d:.3f}, w0={curr_w0:.3f}")
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+                
+                st.pyplot(fig)
+                plt.close(fig)
+                model.train()
 
     prog_bar.progress(100)
     
