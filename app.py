@@ -2,119 +2,136 @@ import streamlit as st
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from pinn_model import FCN
+import pandas as pd
+from pinn_model import InversePINN
 from physics import oscillator_solution
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Interactive PINN Tutorial", layout="wide")
+st.set_page_config(page_title="AI Parameter Discovery", layout="wide")
 
-st.title("🧠 Physics-Informed Neural Networks (PINNs)")
+st.title("🕵️ AI Physicist: Auto-Discovering Parameters")
 st.markdown("""
-This app demonstrates how a Neural Network can learn to solve a differential equation 
-by using the **Laws of Physics** in its loss function, even with very little training data.
+**The Inverse Problem:** We give the AI noisy data from an experiment. 
+It must simultaneously learn to fit the curve **AND** calculate the hidden physical constants ($d$ and $w_0$).
 """)
 
-# --- SIDEBAR CONTROLS ---
-st.sidebar.header("1. Problem Parameters")
-d = st.sidebar.slider("Damping (d)", 0.0, 1.0, 0.2, 0.1)
-w0 = st.sidebar.slider("Frequency (w0)", 2.0, 10.0, 4.0, 0.5)
+# --- SIDEBAR: CREATE THE "REALITY" ---
+st.sidebar.header("1. Secret Reality (Ground Truth)")
+true_d = st.sidebar.slider("True Damping (d)", 0.0, 1.0, 0.3)
+true_w0 = st.sidebar.slider("True Frequency (w0)", 2.0, 8.0, 5.0)
 
-st.sidebar.header("2. Training Parameters")
-learning_rate = st.sidebar.number_input("Learning Rate", value=0.001, format="%.4f")
-iterations = st.sidebar.slider("Training Iterations", 100, 5000, 1000, 100)
-physics_weight = st.sidebar.slider("Physics Loss Weight (Lambda)", 0.0, 10.0, 1.0, 0.1, 
-                                   help="How much importance to give the ODE vs data points.")
+st.sidebar.header("2. Experiment Settings")
+noise_level = st.sidebar.slider("Noise Level", 0.0, 0.2, 0.05, help="How messy is the data?")
+n_points = st.sidebar.slider("Data Points", 10, 100, 40)
 
-st.sidebar.header("3. Data Availability")
-n_data_points = st.sidebar.slider("Number of Training Data Points", 0, 20, 3, 
-                                  help="How many 'answers' does the AI get to see?")
+st.sidebar.header("3. AI Training")
+lr = st.sidebar.selectbox("Learning Rate", [0.01, 0.005, 0.001], index=1)
+iterations = st.sidebar.slider("Iterations", 500, 5000, 2000)
 
-# --- MAIN CONTENT ---
+# --- MAIN APP ---
 
-# 1. Generate Ground Truth
-t_physics = np.linspace(0, 1, 300).reshape(-1, 1) # Collocation points (dense)
-exact_u = oscillator_solution(d, w0, t_physics)
+col1, col2 = st.columns([1, 1])
 
-# 2. Select sparse training data
-indices = np.linspace(0, 299, n_data_points).astype(int)
-t_data = t_physics[indices]
-u_data = exact_u[indices]
+# 1. Generate "Experimental" Data
+t_full = np.linspace(0, 1, 300).reshape(-1, 1)
+u_clean = oscillator_solution(true_d, true_w0, t_full)
 
-col1, col2 = st.columns([1, 2])
+# Select random points for training data
+idx = np.linspace(0, 299, n_points).astype(int)
+t_train = t_full[idx]
+# Add noise to simulate real world data
+noise = np.random.normal(0, noise_level, u_clean[idx].shape)
+u_train = u_clean[idx] + noise
 
+# Display the challenge
 with col1:
-    st.subheader("The Physics (ODE)")
-    st.latex(r"m\frac{d^2u}{dt^2} + \mu\frac{du}{dt} + ku = 0")
-    st.info(f"""
-    We are trying to approximate the function $u(t)$.
+    st.subheader("The Challenge")
+    fig_data, ax_d = plt.subplots(figsize=(6, 4))
+    ax_d.plot(t_full, u_clean, 'k--', alpha=0.3, label="True Physics (Unknown to AI)")
+    ax_d.scatter(t_train, u_train, c='red', label="Noisy Data (Given to AI)")
+    ax_d.legend()
+    st.pyplot(fig_data)
     
-    **Data Loss:** We give the NN {n_data_points} known points (Green Dots).
-    
-    **Physics Loss:** We tell the NN that for *every* point $t$, it must satisfy the equation above.
-    """)
-    
-    start_btn = st.button("Train PINN Model", type="primary")
+    st.info(f"The AI starts with a guess: d=0.0, w0=1.0")
+    start = st.button("Start Discovery", type="primary")
 
-# --- TRAINING LOOP ---
-if start_btn:
-    # Convert to PyTorch Tensors
-    t_physics_torch = torch.tensor(t_physics, dtype=torch.float32, requires_grad=True)
-    t_data_torch = torch.tensor(t_data, dtype=torch.float32)
-    u_data_torch = torch.tensor(u_data, dtype=torch.float32)
+if start:
+    # Setup PyTorch Data
+    t_phys_torch = torch.tensor(t_full, dtype=torch.float32)
+    t_train_torch = torch.tensor(t_train, dtype=torch.float32)
+    u_train_torch = torch.tensor(u_train, dtype=torch.float32)
 
-    # Initialize Model (Input=1 time, Hidden=3 layers of 32, Output=1 displacement)
-    layers = [1, 32, 32, 32, 1]
-    model = FCN(layers)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-    # Placeholders for live plotting
-    chart_placeholder = st.empty()
-    progress_bar = st.progress(0)
+    # Initialize Model
+    model = InversePINN(layers=[1, 32, 32, 1])
     
-    loss_history = []
+    # We optimize Weights AND Parameters (d, w0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
+    # Tracking history for plots
+    history = {'loss': [], 'd': [], 'w0': []}
+    
+    # Progress bars
+    prog_bar = st.progress(0)
+    status_text = st.empty()
+    chart_placeholder = col2.empty()
 
     for i in range(iterations):
         optimizer.zero_grad()
         
-        # 1. Loss based on Data (Standard NN training)
-        loss1 = 0
-        if n_data_points > 0:
-            loss1 = model.loss_data(t_data_torch, u_data_torch)
+        # Loss 1: Fit the noisy data
+        loss_d = model.loss_data(t_train_torch, u_train_torch)
         
-        # 2. Loss based on Physics (PINN specific)
-        loss2 = model.loss_physics(t_physics_torch, d, w0)
+        # Loss 2: Obey Physics (with current d_param and w0_param)
+        loss_p = model.loss_physics(t_phys_torch)
         
-        # Total Loss
-        loss = loss1 + (physics_weight * loss2)
+        loss = loss_d + loss_p
         loss.backward()
         optimizer.step()
         
-        loss_history.append(loss.item())
+        # Record stats
+        curr_d, curr_w0 = model.get_params()
+        history['loss'].append(loss.item())
+        history['d'].append(curr_d)
+        history['w0'].append(curr_w0)
         
-        if i % (iterations // 10) == 0:
-            progress_bar.progress((i+1)/iterations)
+        if i % 50 == 0:
+            prog_bar.progress((i+1)/iterations)
+            status_text.text(f"Iter {i}: Found d={curr_d:.4f}, w0={curr_w0:.4f}")
+            
+            # Live update plot every 500 iters to save speed
+            if i % 500 == 0:
+                with chart_placeholder.container():
+                    # Plot 1: Parameter Convergence
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8))
+                    
+                    ax1.plot(history['d'], label='Estimated d')
+                    ax1.axhline(y=true_d, color='g', linestyle='--', label='True d')
+                    ax1.plot(history['w0'], label='Estimated w0')
+                    ax1.axhline(y=true_w0, color='r', linestyle='--', label='True w0')
+                    ax1.set_title("Parameter Discovery Over Time")
+                    ax1.legend()
+                    
+                    # Plot 2: Curve Fit
+                    model.eval()
+                    pred = model(t_phys_torch).detach().numpy()
+                    ax2.plot(t_full, u_clean, 'g--', alpha=0.5, label="True Clean")
+                    ax2.plot(t_full, pred, 'b-', label="AI Approximation")
+                    ax2.scatter(t_train, u_train, c='red', s=10, alpha=0.5)
+                    ax2.set_title("Current Physical Model")
+                    ax2.legend()
+                    
+                    st.pyplot(fig)
+                    plt.close(fig)
+                    model.train()
 
-    progress_bar.progress(100)
-
-    # --- FINAL PLOT ---
-    with col2:
-        st.subheader("Results")
-        
-        # Get prediction
-        model.eval()
-        prediction = model(t_physics_torch).detach().numpy()
-        
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(t_physics, exact_u, 'k--', label="Exact Solution (Physics)", alpha=0.6)
-        ax.plot(t_physics, prediction, 'r-', label="PINN Prediction", linewidth=2)
-        ax.scatter(t_data, u_data, color='green', s=100, label="Training Data", zorder=5)
-        
-        ax.set_title(f"PINN Approximation (Points: {n_data_points}, Physics Weight: {physics_weight})")
-        ax.set_xlabel("Time (t)")
-        ax.set_ylabel("Displacement (u)")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        st.pyplot(fig)
-        
-        st.success(f"Final Loss: {loss.item():.6f}")
+    prog_bar.progress(100)
+    
+    # Final Result Display
+    final_d, final_w0 = model.get_params()
+    
+    st.success("Discovery Complete!")
+    
+    res_col1, res_col2 = st.columns(2)
+    res_col1.metric("Damping (d)", f"{final_d:.4f}", delta=f"{final_d - true_d:.4f}")
+    res_col2.metric("Frequency (w0)", f"{final_w0:.4f}", delta=f"{final_w0 - true_w0:.4f}")
+    
+    st.markdown("If the Delta (small arrow) is close to 0, the AI successfully discovered the hidden physics law from the noisy data.")
