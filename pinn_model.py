@@ -40,8 +40,10 @@ class FCN(nn.Module):
         Then we check if those derivatives satisfy the ODE:
         u'' + 2d(u') + (w0^2)u = 0
         """
-        g = x_physics.clone()
-        g.requires_grad = True
+        # --- FIX IS HERE ---
+        # We clone the input, DETACH it from any existing graph, 
+        # and then enable gradient tracking. This ensures 'g' is a leaf variable.
+        g = x_physics.clone().detach().requires_grad_(True)
         
         u = self.forward(g)
         
